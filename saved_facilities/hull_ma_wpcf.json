@@ -1,0 +1,20 @@
+{
+  "facility_name": "Hull, MA WPCF",
+  "saved_at": "2026-07-07T22:15:40.880511+00:00",
+  "clarifiers": [
+    {
+      "Name": "Clarifier 1",
+      "Shape": "Circular",
+      "Diameter (ft)": 80.0,
+      "Length (ft)": null,
+      "Width (ft)": null
+    },
+    {
+      "Name": "Clarifier 2",
+      "Shape": "Circular",
+      "Diameter (ft)": 80.0,
+      "Length (ft)": null,
+      "Width (ft)": null
+    }
+  ]
+}
