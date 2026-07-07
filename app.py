@@ -84,6 +84,29 @@ def min_required_area(Xa_mgL, Xu_mgL, QR_mgd, Vo, k, area_lo=50, area_hi=300000,
             lo = mid
     return hi
 
+def max_allowable_mlss(Q_mgd, QR_mgd, area_ft2, Vo, k, measured_Xu=None, mlss_lo=100, mlss_hi=50000, tol=10.0):
+    """How high could MLSS go (holding Q, QR, area fixed) before losing capacity.
+    If Xu is measured/fixed, Xu stays fixed as MLSS climbs. If Xu is mass-balance
+    estimated, it scales up proportionally with MLSS, same as the live calculation."""
+    def ok_at(mlss):
+        xu = underflow_conc(mlss, Q_mgd, QR_mgd, measured_Xu)
+        ok, *_ = check_capacity(mlss, xu, QR_mgd, area_ft2, Vo, k)
+        return ok
+
+    if not ok_at(mlss_lo):
+        return mlss_lo, True  # already over capacity at a low reference MLSS
+    if ok_at(mlss_hi):
+        return mlss_hi, False  # capacity extends beyond the search ceiling, report as a floor
+
+    lo, hi = mlss_lo, mlss_hi
+    while hi - lo > tol:
+        mid = (lo + hi) / 2
+        if ok_at(mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo, True
+
 def clarifier_area(row):
     if row["Shape"] == "Circular":
         d = row.get("Diameter (ft)", 0) or 0
@@ -280,11 +303,27 @@ else:
     headline = "The sludge blanket will build up rather than reach steady state at this operating point."
 status_banner(ok_system, margin_system, headline)
 
+max_mlss, max_mlss_is_exact = max_allowable_mlss(Q, QR, A_total, Vo, k, measured_Xu)
+
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Online area", f"{A_total:,.0f} ft2", f"{len(online_df)} of {len(df)} units")
 m2.metric("Applied flux", f"{SFa_system:.1f} lb/day/ft2")
 m3.metric("RAS conc. (Xu)", f"{Xu:,.0f} mg/L")
-m4.metric("Margin", f"{margin_system:+.0f}%")
+if ok_system:
+    mlss_delta = max_mlss - MLSS
+    m4.metric("MLSS headroom", f"{'>' if not max_mlss_is_exact else ''}{max_mlss:,.0f} mg/L",
+              f"+{mlss_delta:,.0f} mg/L before overload")
+else:
+    over_by = MLSS - max_mlss
+    m4.metric("MLSS over limit by", f"{over_by:,.0f} mg/L", f"limit ~{max_mlss:,.0f} mg/L", delta_color="inverse")
+
+st.caption(
+    f"In plain terms: with this configuration, MLSS could run up to about **{max_mlss:,.0f} mg/L** "
+    f"before this clarifier system loses capacity (currently **{MLSS:,.0f} mg/L**). "
+    f"That's holding flow, RAS rate, and online area fixed at what's entered above. "
+    f"(Technical detail: the underlying capacity margin is {margin_system:+.0f}% at the tightest point "
+    f"on the flux curve, see the diagram at the bottom of the page.)"
+)
 
 # ----------------------------- Step 4: per-clarifier check ---------------------
 
