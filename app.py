@@ -3,6 +3,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import os
+import re
+import json
+import base64
+import requests
+from datetime import datetime, timezone
 
 st.set_page_config(page_title="Clarifier State-Point Analysis", layout="wide")
 
@@ -152,6 +157,92 @@ def status_banner(ok, margin, headline):
         unsafe_allow_html=True,
     )
 
+# ----------------------------- facility save/load (GitHub-backed) -----------
+
+SAVE_DIR = "saved_facilities"
+
+def _slugify(name):
+    s = re.sub(r"[^a-zA-Z0-9]+", "_", name.strip().lower()).strip("_")
+    return s or "unnamed"
+
+def _gh_config():
+    """Reads GitHub repo/token from Streamlit secrets. Returns (token, repo, branch)
+    or (None, None, None) if not configured, so the app degrades gracefully."""
+    try:
+        token = st.secrets["github"]["token"]
+        repo = st.secrets["github"]["repo"]  # format: "owner/repo-name"
+        branch = st.secrets["github"].get("branch", "main")
+        return token, repo, branch
+    except Exception:
+        return None, None, None
+
+def _gh_headers(token):
+    return {"Authorization": f"token {token}", "Accept": "application/vnd.github+json"}
+
+def save_load_configured():
+    token, *_ = _gh_config()
+    return token is not None
+
+def list_saved_facilities():
+    token, repo, branch = _gh_config()
+    if not token:
+        return None
+    url = f"https://api.github.com/repos/{repo}/contents/{SAVE_DIR}?ref={branch}"
+    try:
+        resp = requests.get(url, headers=_gh_headers(token), timeout=10)
+        if resp.status_code == 404:
+            return []
+        resp.raise_for_status()
+        items = resp.json()
+        return sorted(item["name"][:-5] for item in items if item["name"].endswith(".json"))
+    except Exception:
+        return None
+
+def load_facility(slug):
+    token, repo, branch = _gh_config()
+    if not token:
+        return None
+    url = f"https://api.github.com/repos/{repo}/contents/{SAVE_DIR}/{slug}.json?ref={branch}"
+    try:
+        resp = requests.get(url, headers=_gh_headers(token), timeout=10)
+        resp.raise_for_status()
+        content = base64.b64decode(resp.json()["content"]).decode("utf-8")
+        return json.loads(content)
+    except Exception:
+        return None
+
+def save_facility(slug, display_name, clarifier_records):
+    token, repo, branch = _gh_config()
+    if not token:
+        return False, "Save/load isn't set up yet. Ask whoever deployed this to add the GitHub connection in app secrets."
+    url = f"https://api.github.com/repos/{repo}/contents/{SAVE_DIR}/{slug}.json"
+    payload_data = {
+        "facility_name": display_name,
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "clarifiers": clarifier_records,
+    }
+    content_b64 = base64.b64encode(json.dumps(payload_data, indent=2).encode("utf-8")).decode("utf-8")
+    sha = None
+    try:
+        get_resp = requests.get(f"{url}?ref={branch}", headers=_gh_headers(token), timeout=10)
+        if get_resp.status_code == 200:
+            sha = get_resp.json()["sha"]
+    except Exception:
+        pass
+    put_payload = {
+        "message": f"Update saved clarifier config for {display_name}",
+        "content": content_b64,
+        "branch": branch,
+    }
+    if sha:
+        put_payload["sha"] = sha
+    try:
+        put_resp = requests.put(url, headers=_gh_headers(token), json=put_payload, timeout=10)
+        put_resp.raise_for_status()
+        return True, f"Saved {display_name}."
+    except Exception as e:
+        return False, f"Save failed: {e}"
+
 # ----------------------------- header ---------------------------------------
 
 logo_light_path = os.path.join(os.path.dirname(__file__), "inframark_logo.webp")
@@ -200,6 +291,94 @@ This is a screening tool, not a substitute for engineering judgment on plants ne
 sludge blanket depths, poor settleability (bulking/rising sludge), or SVI trending upward.
         """
     )
+
+# ----------------------------- Facility save/load ----------------------------
+
+CLARIFIER_SAVE_COLS = ["Name", "Shape", "Diameter (ft)", "Length (ft)", "Width (ft)"]
+
+def _records_equal(a_records, b_records):
+    """NaN-safe comparison of two clarifier record lists. Plain dict/JSON equality
+    breaks on NaN (NaN != NaN in Python), which would cause a false 'unsaved changes'
+    warning immediately after every successful save or load. pandas' .equals() treats
+    NaN as equal to NaN, so route the comparison through DataFrames instead."""
+    if a_records is None or b_records is None:
+        return False
+    try:
+        df_a = pd.DataFrame(a_records)
+        df_b = pd.DataFrame(b_records)
+        for c in CLARIFIER_SAVE_COLS:
+            if c not in df_a.columns:
+                df_a[c] = None
+            if c not in df_b.columns:
+                df_b[c] = None
+        df_a = df_a[CLARIFIER_SAVE_COLS].reset_index(drop=True)
+        df_b = df_b[CLARIFIER_SAVE_COLS].reset_index(drop=True)
+        for c in ["Diameter (ft)", "Length (ft)", "Width (ft)"]:
+            df_a[c] = pd.to_numeric(df_a[c], errors="coerce")
+            df_b[c] = pd.to_numeric(df_b[c], errors="coerce")
+        if len(df_a) != len(df_b):
+            return False
+        return df_a.equals(df_b)
+    except Exception:
+        return False
+
+st.header("Facility")
+
+if "facility_name" not in st.session_state:
+    st.session_state["facility_name"] = ""
+if "last_saved_snapshot" not in st.session_state:
+    st.session_state["last_saved_snapshot"] = None
+if "confirm_overwrite_slug" not in st.session_state:
+    st.session_state["confirm_overwrite_slug"] = None
+
+with st.container(border=True):
+    facility_name = st.text_input(
+        "Facility / Site Name",
+        value=st.session_state["facility_name"],
+        placeholder="e.g. Hull WPCF",
+        help="Used to save and load this site's clarifier setup. If someone else already entered "
+             "this site's tanks, load it here first instead of re-typing dimensions.",
+    )
+    if facility_name != st.session_state["facility_name"]:
+        st.session_state["confirm_overwrite_slug"] = None  # reset confirm state if they switch sites
+    st.session_state["facility_name"] = facility_name
+
+    if not save_load_configured():
+        st.caption("Save/load isn't set up yet for this deployment. See README for the one-time GitHub setup.")
+    else:
+        saved_list = list_saved_facilities()
+        load_col, btn_col = st.columns([3, 1])
+        with load_col:
+            if saved_list is None:
+                st.caption("Couldn't reach GitHub to list saved facilities. Check the connection/secrets.")
+                chosen = None
+            elif not saved_list:
+                st.caption("No saved facilities yet, be the first for your site. Enter clarifiers below, "
+                           "you'll get a chance to save right after.")
+                chosen = None
+            else:
+                chosen = st.selectbox("Load a previously saved facility", ["-- select --"] + saved_list,
+                                       label_visibility="collapsed")
+        with btn_col:
+            if saved_list and chosen and chosen != "-- select --":
+                if st.button("\U0001F4C2 Load"):
+                    data = load_facility(chosen)
+                    if data:
+                        loaded_df = pd.DataFrame(data["clarifiers"])
+                        loaded_df["Online?"] = True
+                        loaded_df["Flow Split Override (%)"] = None
+                        st.session_state.clarifier_df = loaded_df
+                        if "clarifier_editor" in st.session_state:
+                            del st.session_state["clarifier_editor"]
+                        st.session_state["facility_name"] = data.get("facility_name", chosen)
+                        st.session_state["last_saved_snapshot"] = data.get("clarifiers")
+                        st.session_state["confirm_overwrite_slug"] = None
+                        saved_when = data.get("saved_at", "")[:10]
+                        st.success(f"Loaded {data.get('facility_name', chosen)}"
+                                   + (f" (saved {saved_when})" if saved_when else ""))
+                        st.rerun()
+                    else:
+                        st.error("Couldn't load that facility.")
 
 # ----------------------------- Step 1: inputs --------------------------------
 
@@ -287,6 +466,46 @@ online_df = df[df["Online?"] == True].copy()
 if online_df.empty:
     st.error("No clarifiers are marked online. Toggle at least one on to run the analysis.")
     st.stop()
+
+# ---- save nudge: right after they've entered/edited the inventory, the natural moment to save ----
+if save_load_configured():
+    with st.container(border=True):
+        records = df[CLARIFIER_SAVE_COLS].to_dict(orient="records")
+        unsaved = facility_name.strip() and not _records_equal(records, st.session_state["last_saved_snapshot"])
+
+        if not facility_name.strip():
+            st.caption("Enter a Facility / Site Name above to save this clarifier setup for next time.")
+        else:
+            slug = _slugify(facility_name)
+            saved_list_now = list_saved_facilities()
+            already_exists = bool(saved_list_now and slug in saved_list_now)
+            pending_confirm = st.session_state["confirm_overwrite_slug"] == slug
+
+            if unsaved:
+                st.markdown("\u26A0\uFE0F **Unsaved changes.** Nothing here saves automatically, "
+                            "closing the tab loses this.")
+            else:
+                st.caption(f"'{facility_name.strip()}' is saved and up to date.")
+
+            if pending_confirm:
+                st.warning(f"'{facility_name.strip()}' already has saved data. "
+                           f"Click the button below again to overwrite it.")
+
+            btn_label = "\u26A0\uFE0F Confirm overwrite" if pending_confirm else "\U0001F4BE Save this facility's clarifier setup"
+            if st.button(btn_label, disabled=not unsaved and not pending_confirm):
+                if not records:
+                    st.warning("Nothing to save yet, add clarifiers above first.")
+                elif already_exists and not pending_confirm:
+                    st.session_state["confirm_overwrite_slug"] = slug
+                    st.rerun()
+                else:
+                    ok, msg = save_facility(slug, facility_name.strip(), records)
+                    st.session_state["confirm_overwrite_slug"] = None
+                    if ok:
+                        st.session_state["last_saved_snapshot"] = records
+                        st.success(msg)
+                    else:
+                        st.error(msg)
 
 # ---- flow split resolution ----
 overrides = online_df["Flow Split Override (%)"]
