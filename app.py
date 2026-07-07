@@ -51,9 +51,11 @@ def underflow_conc(Xa_mgL, Q_mgd, QR_mgd, measured_Xu=None):
         return np.nan
     return Xa_mgL * (Q_mgd + QR_mgd) / QR_mgd
 
-def check_capacity(Xa_mgL, Xu_mgL, QR_mgd, area_ft2, Vo, k, n=400):
+def check_capacity(Xa_mgL, Xu_mgL, QR_mgd, area_ft2, Vo, k, applied_flux_ref=None, n=400):
     """Direct check: does the required underflow removal line stay at/below
-    the gravity flux curve for all X between Xa and Xu?"""
+    the gravity flux curve for all X between Xa and Xu? margin_pct is normalized
+    against the applied flux (a stable reference) rather than the local line value,
+    which can approach zero near Xu and blow up the percentage otherwise."""
     if area_ft2 <= 0 or Xu_mgL <= Xa_mgL:
         return False, -100.0, None, None, None
     QR_gpd_per_ft2 = QR_mgd * 1e6 / area_ft2
@@ -63,7 +65,7 @@ def check_capacity(Xa_mgL, Xu_mgL, QR_mgd, area_ft2, Vo, k, n=400):
     gap = gravity - line
     ok = bool(np.min(gap) >= 0)
     worst_idx = int(np.argmin(gap))
-    ref = max(line[worst_idx], 1e-6)
+    ref = applied_flux_ref if applied_flux_ref else max(gravity[0], 1e-6)
     margin_pct = float((gap[worst_idx] / ref) * 100.0)
     return ok, margin_pct, Xs, gravity, line
 
@@ -84,24 +86,39 @@ def min_required_area(Xa_mgL, Xu_mgL, QR_mgd, Vo, k, area_lo=50, area_hi=300000,
             lo = mid
     return hi
 
-def max_allowable_mlss(Q_mgd, QR_mgd, area_ft2, Vo, k, measured_Xu=None, mlss_lo=100, mlss_hi=50000, tol=10.0):
-    """How high could MLSS go (holding Q, QR, area fixed) before losing capacity.
-    If Xu is measured/fixed, Xu stays fixed as MLSS climbs. If Xu is mass-balance
-    estimated, it scales up proportionally with MLSS, same as the live calculation."""
-    def ok_at(mlss):
-        xu = underflow_conc(mlss, Q_mgd, QR_mgd, measured_Xu)
-        ok, *_ = check_capacity(mlss, xu, QR_mgd, area_ft2, Vo, k)
-        return ok
+def mlss_threshold_from_current(Q_mgd, QR_mgd, area_ft2, Vo, k, current_mlss, currently_ok,
+                                 measured_Xu=None, ceiling=50000, floor=50):
+    """
+    Find how far MLSS could move from the CURRENT operating point before the pass/fail
+    status flips. Always anchored at current_mlss (which must match currently_ok, the
+    same boolean already computed for the main system check), so this can never report
+    a threshold that contradicts the main result. Walks outward and only refines locally,
+    no assumption that pass/fail is monotonic across the whole MLSS range.
+    Returns (threshold_mlss, found: bool). found=False means no flip within the search range.
+    """
+    bound = ceiling if currently_ok else floor
+    if (currently_ok and current_mlss >= bound) or (not currently_ok and current_mlss <= bound):
+        return bound, False
 
-    if not ok_at(mlss_lo):
-        return mlss_lo, True  # already over capacity at a low reference MLSS
-    if ok_at(mlss_hi):
-        return mlss_hi, False  # capacity extends beyond the search ceiling, report as a floor
+    coarse = np.linspace(current_mlss, bound, 200)
+    flip_at = None
+    for i, m in enumerate(coarse):
+        if m <= 0:
+            continue
+        xu = underflow_conc(m, Q_mgd, QR_mgd, measured_Xu)
+        ok, *_ = check_capacity(m, xu, QR_mgd, area_ft2, Vo, k)
+        if ok != currently_ok:
+            flip_at = i
+            break
+    if flip_at is None:
+        return bound, False
 
-    lo, hi = mlss_lo, mlss_hi
-    while hi - lo > tol:
+    lo, hi = coarse[max(flip_at - 1, 0)], coarse[flip_at]
+    for _ in range(40):
         mid = (lo + hi) / 2
-        if ok_at(mid):
+        xu = underflow_conc(mid, Q_mgd, QR_mgd, measured_Xu)
+        ok, *_ = check_capacity(mid, xu, QR_mgd, area_ft2, Vo, k)
+        if ok == currently_ok:
             lo = mid
         else:
             hi = mid
@@ -291,7 +308,8 @@ A_total = online_df["Area (ft2)"].sum()
 # ---- system-level state point (shared by all sections below) ----
 Xu = underflow_conc(MLSS, Q, QR, measured_Xu)
 SFa_system = applied_flux(Q + QR, MLSS, A_total)
-ok_system, margin_system, Xs_curve, grav_curve, line_curve = check_capacity(MLSS, Xu, QR, A_total, Vo, k)
+ok_system, margin_system, Xs_curve, grav_curve, line_curve = check_capacity(
+    MLSS, Xu, QR, A_total, Vo, k, applied_flux_ref=SFa_system)
 
 # ----------------------------- Step 3: system result --------------------------
 
@@ -303,22 +321,22 @@ else:
     headline = "The sludge blanket will build up rather than reach steady state at this operating point."
 status_banner(ok_system, margin_system, headline)
 
-max_mlss, max_mlss_is_exact = max_allowable_mlss(Q, QR, A_total, Vo, k, measured_Xu)
+mlss_threshold, threshold_found = mlss_threshold_from_current(Q, QR, A_total, Vo, k, MLSS, ok_system, measured_Xu)
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Online area", f"{A_total:,.0f} ft2", f"{len(online_df)} of {len(df)} units")
 m2.metric("Applied flux", f"{SFa_system:.1f} lb/day/ft2")
 m3.metric("RAS conc. (Xu)", f"{Xu:,.0f} mg/L")
 if ok_system:
-    mlss_delta = max_mlss - MLSS
-    m4.metric("MLSS headroom", f"{'>' if not max_mlss_is_exact else ''}{max_mlss:,.0f} mg/L",
+    mlss_delta = mlss_threshold - MLSS
+    m4.metric("MLSS headroom", f"{'>' if not threshold_found else ''}{mlss_threshold:,.0f} mg/L",
               f"+{mlss_delta:,.0f} mg/L before overload")
 else:
-    over_by = MLSS - max_mlss
-    m4.metric("MLSS over limit by", f"{over_by:,.0f} mg/L", f"limit ~{max_mlss:,.0f} mg/L", delta_color="inverse")
+    over_by = MLSS - mlss_threshold
+    m4.metric("MLSS over limit by", f"{over_by:,.0f} mg/L", f"limit ~{mlss_threshold:,.0f} mg/L", delta_color="inverse")
 
 st.caption(
-    f"In plain terms: with this configuration, MLSS could run up to about **{max_mlss:,.0f} mg/L** "
+    f"In plain terms: with this configuration, MLSS could run up to about **{mlss_threshold:,.0f} mg/L** "
     f"before this clarifier system loses capacity (currently **{MLSS:,.0f} mg/L**). "
     f"That's holding flow, RAS rate, and online area fixed at what's entered above. "
     f"(Technical detail: the underlying capacity margin is {margin_system:+.0f}% at the tightest point "
@@ -335,7 +353,8 @@ for _, r in online_df.iterrows():
     area_i = r["Area (ft2)"]
     q_i = (Q + QR) * r["Flow % "] / 100.0
     sfa_i = applied_flux(q_i, MLSS, area_i)
-    ok_i, margin_i, *_ = check_capacity(MLSS, Xu, QR * r["Flow % "] / 100.0, area_i, Vo, k)
+    ok_i, margin_i, *_ = check_capacity(MLSS, Xu, QR * r["Flow % "] / 100.0, area_i, Vo, k,
+                                         applied_flux_ref=sfa_i)
     rows.append({
         "Clarifier": r["Name"],
         "Area (ft2)": round(area_i),
