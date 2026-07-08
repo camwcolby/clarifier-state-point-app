@@ -1,0 +1,34 @@
+{
+  "facility_name": "OKC Chisholm Creek WWTP",
+  "saved_at": "2026-07-08T17:27:55.527687+00:00",
+  "clarifiers": [
+    {
+      "Name": "Clarifier 1",
+      "Shape": "Circular",
+      "Diameter (ft)": 90.0,
+      "Length (ft)": null,
+      "Width (ft)": null
+    },
+    {
+      "Name": "Clarifier 2",
+      "Shape": "Circular",
+      "Diameter (ft)": 90.0,
+      "Length (ft)": null,
+      "Width (ft)": null
+    },
+    {
+      "Name": "Clarifier 3",
+      "Shape": "Circular",
+      "Diameter (ft)": 90.0,
+      "Length (ft)": null,
+      "Width (ft)": null
+    },
+    {
+      "Name": "Clarifier 4",
+      "Shape": "Circular",
+      "Diameter (ft)": 90.0,
+      "Length (ft)": null,
+      "Width (ft)": null
+    }
+  ]
+}
