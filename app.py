@@ -193,6 +193,7 @@ def save_load_configured():
     token, *_ = _gh_config()
     return token is not None
 
+@st.cache_data(ttl=30, show_spinner=False)
 def list_saved_facilities():
     token, repo, branch = _gh_config()
     if not token:
@@ -517,6 +518,7 @@ if save_load_configured():
                     st.session_state["confirm_overwrite_slug"] = None
                     if ok:
                         st.session_state["last_saved_snapshot"] = records
+                        list_saved_facilities.clear()
                         st.success(msg)
                     else:
                         st.error(msg)
@@ -689,20 +691,30 @@ st.divider()
 st.header("State-Point Diagram")
 st.caption("Technical detail behind the Step 3 result, for anyone who wants to see the underlying curve.")
 
-fig, ax = plt.subplots(figsize=(7, 4.5))
+fig, ax = plt.subplots(figsize=(7, 5))
 X_plot = np.linspace(1, max(Xu * 1.1, MLSS * 1.2), 300)
-ax.plot(X_plot, gravity_flux(X_plot, Vo, k), label="Gravity (Vesilind) flux curve", color=BLUE)
+ax.plot(X_plot, gravity_flux(X_plot, Vo, k), label="Gravity (Vesilind) flux curve", color=BLUE, linewidth=2)
 if Xs_curve is not None:
-    ax.plot(Xs_curve, line_curve, label="Underflow requirement", color=FAIL_RED, linestyle="--")
-ax.scatter([MLSS], [SFa_system], color=NAVY, zorder=5, label="State point (applied)")
+    ax.axvspan(MLSS, Xu, color=GRAY, alpha=0.08, zorder=0)
+    ax.plot(Xs_curve, line_curve, label="Underflow requirement", color=FAIL_RED, linestyle="--", linewidth=2.5)
+ax.scatter([MLSS], [SFa_system], color=NAVY, zorder=5, s=70, label="State point (applied)")
 ax.axvline(Xu, color="gray", linestyle=":", linewidth=1)
 ax.text(Xu, ax.get_ylim()[1] * 0.02, " Xu", va="bottom", ha="left", color="gray")
 ax.set_xlabel("Solids concentration, X (mg/L)")
 ax.set_ylabel("Solids flux (lb/day/ft2)")
 ax.set_title("State-Point Diagram")
-ax.legend(loc="upper right", fontsize=8)
+ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=3, fontsize=8, frameon=False)
 ax.grid(alpha=0.3)
 st.pyplot(fig, width='stretch')
+
+st.caption(
+    "The shaded band is the range actually checked, between your MLSS and Xu. The state point "
+    "(black dot) can sit above the blue curve and still be fine, that dot isn't the pass/fail test. "
+    "What matters is whether the red dashed line stays under the blue curve across the shaded band. "
+    "When RAS flow is large relative to plant flow, most solids transport happens via bulk downward "
+    "flow from the RAS withdrawal itself, so gravity settling doesn't need to carry much, which is "
+    "why the red line can sit well below the blue curve even when the state point sits well above it."
+)
 
 st.divider()
 st.caption(
