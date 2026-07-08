@@ -138,6 +138,16 @@ def clarifier_area(row):
         w = row.get("Width (ft)", 0) or 0
         return l * w
 
+def default_clarifier_template():
+    return pd.DataFrame(
+        [
+            {"Name": "Clarifier 1", "Shape": "Circular", "Diameter (ft)": 80.0,
+             "Length (ft)": None, "Width (ft)": None, "Online?": True, "Flow Split Override (%)": None},
+            {"Name": "Clarifier 2", "Shape": "Circular", "Diameter (ft)": 80.0,
+             "Length (ft)": None, "Width (ft)": None, "Online?": True, "Flow Split Override (%)": None},
+        ]
+    )
+
 def req(label):
     """Append a required-field marker to a widget label."""
     return f"{label}  :red[*]"
@@ -338,6 +348,7 @@ with st.container(border=True):
         placeholder="e.g. Hull WPCF",
         help="Used to save and load this site's clarifier setup. If someone else already entered "
              "this site's tanks, load it here first instead of re-typing dimensions.",
+        key="input_facility_name",
     )
     if facility_name != st.session_state["facility_name"]:
         st.session_state["confirm_overwrite_slug"] = None  # reset confirm state if they switch sites
@@ -380,6 +391,9 @@ with st.container(border=True):
                     else:
                         st.error("Couldn't load that facility.")
 
+    if "confirm_clear_form" not in st.session_state:
+        st.session_state["confirm_clear_form"] = False
+
 # ----------------------------- Step 1: inputs --------------------------------
 
 st.header("Step 1: Plant & Settling Data")
@@ -390,21 +404,26 @@ with col_left:
     with st.container(border=True):
         st.subheader("Plant Operating Data")
         Q = st.number_input(req("Influent flow, Q (MGD)"), min_value=0.0, value=5.0, step=0.1,
-                             help="Current influent flow to the secondary process, in million gallons per day.")
+                             help="Current influent flow to the secondary process, in million gallons per day.",
+                             key="input_Q")
         QR = st.number_input(req("RAS flow, QR (MGD)"), min_value=0.0, value=2.5, step=0.1,
-                              help="Return activated sludge flow rate, in million gallons per day.")
+                              help="Return activated sludge flow rate, in million gallons per day.",
+                              key="input_QR")
         MLSS = st.number_input(req("MLSS at clarifier inlet (mg/L)"), min_value=0.0, value=3000.0, step=50.0,
-                                help="Mixed liquor suspended solids concentration entering the clarifiers.")
+                                help="Mixed liquor suspended solids concentration entering the clarifiers.",
+                                key="input_MLSS")
 
         xu_mode = st.radio(
             "RAS concentration (Xu)",
             ["Estimate from mass balance", "Use measured value"],
             horizontal=True,
+            key="input_xu_mode",
         )
         measured_Xu = None
         if xu_mode == "Use measured value":
             measured_Xu = st.number_input(req("Measured RAS TSS (mg/L)"), min_value=0.0, value=9000.0, step=100.0,
-                                           help="Lab or probe reading of RAS solids concentration, if available.")
+                                           help="Lab or probe reading of RAS solids concentration, if available.",
+                                           key="input_measured_Xu")
 
         if QR <= 0 and not measured_Xu:
             st.warning("RAS flow is 0. Enter a measured RAS TSS value above, or set RAS flow > 0, "
@@ -416,9 +435,11 @@ with col_right:
         st.subheader("Vesilind Settling Parameters")
         st.caption("Typical ranges: Vo 8-20 ft/hr, k 0.3-0.6 L/g. Refine with your own settling column data if available.")
         Vo = st.number_input(req("Vo (ft/hr)"), min_value=0.1, value=15.0, step=0.5,
-                              help="Maximum settling velocity coefficient from the Vesilind model.")
+                              help="Maximum settling velocity coefficient from the Vesilind model.",
+                              key="input_Vo")
         k = st.number_input(req("k (L/g)"), min_value=0.01, value=0.40, step=0.01,
-                             help="Concentration coefficient from the Vesilind model.")
+                             help="Concentration coefficient from the Vesilind model.",
+                             key="input_k")
 
 # ----------------------------- Step 2: inventory ------------------------------
 
@@ -429,14 +450,7 @@ st.caption(
 )
 
 if "clarifier_df" not in st.session_state:
-    st.session_state.clarifier_df = pd.DataFrame(
-        [
-            {"Name": "Clarifier 1", "Shape": "Circular", "Diameter (ft)": 80.0,
-             "Length (ft)": None, "Width (ft)": None, "Online?": True, "Flow Split Override (%)": None},
-            {"Name": "Clarifier 2", "Shape": "Circular", "Diameter (ft)": 80.0,
-             "Length (ft)": None, "Width (ft)": None, "Online?": True, "Flow Split Override (%)": None},
-        ]
-    )
+    st.session_state.clarifier_df = default_clarifier_template()
 
 edited_df = st.data_editor(
     st.session_state.clarifier_df,
@@ -506,6 +520,33 @@ if save_load_configured():
                         st.success(msg)
                     else:
                         st.error(msg)
+
+# ---- clear form: lives here (after Step 1 & 2 widgets have already rendered this run) so a
+# rerun() triggered by this button can't accidentally garbage-collect Vo/k's state. Streamlit
+# clears a keyed widget's session_state if that widget isn't re-touched during a completed run,
+# so this control has to sit after everything it needs to leave alone. ----
+with st.container(border=True):
+    if st.session_state["confirm_clear_form"]:
+        st.warning("This clears the facility name, plant data, and clarifier table above "
+                   "(Vesilind settings stay put). Click again to confirm.")
+    clear_label = "\u26A0\uFE0F Confirm clear" if st.session_state["confirm_clear_form"] else "\U0001F9F9 Clear form"
+    if st.button(clear_label, key="btn_clear_form",
+                 help="Resets facility name, plant data, and the clarifier table for the next scenario or "
+                      "the next person. Vo and k are left alone."):
+        if not st.session_state["confirm_clear_form"]:
+            st.session_state["confirm_clear_form"] = True
+            st.rerun()
+        else:
+            for key in ["input_facility_name", "input_Q", "input_QR", "input_MLSS",
+                        "input_xu_mode", "input_measured_Xu", "clarifier_editor"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.session_state["facility_name"] = ""
+            st.session_state["clarifier_df"] = default_clarifier_template()
+            st.session_state["last_saved_snapshot"] = None
+            st.session_state["confirm_overwrite_slug"] = None
+            st.session_state["confirm_clear_form"] = False
+            st.rerun()
 
 # ---- flow split resolution ----
 overrides = online_df["Flow Split Override (%)"]
